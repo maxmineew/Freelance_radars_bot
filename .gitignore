@@ -1,0 +1,10 @@
+.env
+*.db
+*.session*
+run.log
+__pycache__/
+
+# Приватные ссылки-приглашения в чаты: в публичный репозиторий не кладём
+chats.txt
+chats.md
+.claude/

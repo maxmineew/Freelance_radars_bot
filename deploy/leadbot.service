@@ -1,0 +1,12 @@
+[Unit]
+Description=LeadBot: one run (collect, classify, send cards)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=leadbot
+WorkingDirectory=/opt/leadbot
+Environment=PYTHONIOENCODING=utf-8
+ExecStart=/opt/leadbot/venv/bin/python -u run.py
+TimeoutStartSec=3600

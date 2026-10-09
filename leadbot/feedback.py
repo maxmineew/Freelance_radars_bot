@@ -1,0 +1,172 @@
+"""Слушатель: сразу отвечает на кнопки карточек и команды, напоминает о взятых лидах.
+Очередь обновлений Telegram читает только он. Запуск: python -m leadbot.feedback
+(на сервере — служба leadbot-feedback.service)"""
+import json
+import sqlite3
+import subprocess
+import sys
+import time
+from datetime import datetime
+from . import db, reports, telegram_out as tg
+from .config import ROOT, OWNER_CHAT_ID, REMIND_AFTER_HOURS, RUN_HOURS, MAX_CARD_AGE_HOURS
+
+MENU_VERSION = "2"   # поменяйте при изменении кнопок меню: слушатель разошлёт новую клавиатуру
+CHECK_EVERY = 600    # как часто проверять напоминания, секунд
+RESEND_LIMIT = 10    # сколько карточек присылать повторно за одно нажатие
+_run = None          # прогон, запущенный кнопкой
+_checked = 0
+
+
+def on_callback(c, cb):
+    """Нажатие кнопки под карточкой."""
+    msg = cb.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+
+    def answer(text):
+        # Ответ на старое нажатие Telegram отклонит — это не ошибка, отметка уже записана
+        tg.try_api("answerCallbackQuery", callback_query_id=cb["id"], text=text)
+
+    def set_keyboard(markup):
+        if chat_id:
+            tg.try_api("editMessageReplyMarkup", chat_id=chat_id, message_id=msg["message_id"], reply_markup=markup)
+
+    if OWNER_CHAT_ID not in (str(cb["from"]["id"]), str(chat_id)):
+        return answer("Кнопки доступны только владельцу бота")
+    action, _, key = (cb.get("data") or "").partition("|")
+    ch, _, mid = key.rpartition("|")
+    row = None
+    if mid.isdigit() and action in {**tg.BUTTONS, **tg.REASONS, **tg.STAGES}:
+        row = c.execute("SELECT * FROM posts WHERE channel=? AND msg_id=?", (ch, int(mid))).fetchone()
+    if not row:
+        # Кнопка прежнего бота или карточка, запись о которой уже удалена: убираем кнопки с сообщения
+        set_keyboard({"inline_keyboard": []})
+        return answer("Кнопка устарела, убрал её")
+    feedback, reason, stage, stage_at = row["feedback"], row["reason"], row["stage"], row["stage_at"]
+    if action in tg.REASONS:
+        feedback, reason, label = "wrong", action, tg.REASONS[action]
+    elif action in tg.STAGES:
+        feedback, stage, stage_at, label = "take", action, db.now(), tg.STAGES[action]
+    else:
+        label = tg.BUTTONS[action]
+        if action != feedback:
+            feedback, reason, stage, stage_at = action, None, None, db.now()
+    reason, stage = reason if feedback == "wrong" else None, stage if feedback == "take" else None
+    # этап сменился — напоминание по нему ещё не уходило
+    c.execute("UPDATE posts SET feedback=?, reason=?, stage=?, stage_at=?, reminded_at=?,"
+              " tg_msg_id=COALESCE(?, tg_msg_id) WHERE channel=? AND msg_id=?",
+              (feedback, reason, stage, stage_at, row["reminded_at"] if stage_at == row["stage_at"] else None,
+               msg.get("message_id"), ch, int(mid)))
+    c.commit()
+    answer("Записано: " + label)
+    set_keyboard(tg.card_keyboard(key, feedback, reason, stage))
+
+
+def start_run(c):
+    global _run
+    if db.active_run(c) or (_run and _run.poll() is None):
+        return "Прогон уже идёт. Итог пришлю, когда закончится."
+    _run = subprocess.Popen([sys.executable, "-u", str(ROOT / "run.py"), "--notify"], cwd=ROOT)
+    return "Прогон запущен. Обычно он занимает несколько минут, итог пришлю."
+
+
+def resend(c):
+    """Ещё раз присылает свежие карточки, которые владелец не отметил. Новых не ищет — это делает прогон."""
+    rows = c.execute("SELECT * FROM posts WHERE status='sent' AND feedback IS NULL AND card IS NOT NULL"
+                     " AND posted_at > ? ORDER BY score DESC, posted_at DESC",
+                     (db.ago(hours=MAX_CARD_AGE_HOURS),)).fetchall()
+    if not rows:
+        return (f"Свежих карточек без отметки нет (смотрю за последние {MAX_CARD_AGE_HOURS} ч)."
+                " Новые ищет «▶️ Прогон».")
+    for r in rows[:RESEND_LIMIT]:
+        msg_id = tg.send_card(r, json.loads(r["card"]))
+        c.execute("UPDATE posts SET tg_msg_id=? WHERE channel=? AND msg_id=?", (msg_id, r["channel"], r["msg_id"]))
+        c.commit()
+        time.sleep(1)  # лимит Bot API: не чаще одного сообщения в секунду в один чат
+    rest = len(rows) - RESEND_LIMIT
+    return (f"Прислал карточек без отметки: {min(len(rows), RESEND_LIMIT)}."
+            + (f" Осталось ещё {rest} — отметьте эти и нажмите снова." if rest > 0 else ""))
+
+
+def on_message(c, m):
+    """Команда или кнопка меню. Чужим бот не отвечает."""
+    if str(m["chat"]["id"]) != OWNER_CHAT_ID:
+        return
+    text = (m.get("text") or "").strip()
+    cmd = tg.MENU.get(text) or (text.split()[0].split("@")[0][1:].lower() if text.startswith("/") else "")
+    handlers = {"stats": reports.stats, "sources": reports.sources, "leads": reports.leads,
+                "status": reports.status, "run": start_run, "cards": resend}
+    reply = handlers[cmd](c) if cmd in handlers else reports.HELP
+    tg.send(reply, reply_markup=tg.menu_keyboard())
+
+
+def poll(c, wait=50):
+    """Забирает обновления (long polling, ждёт до wait секунд). Номер последнего хранится в базе."""
+    offset = c.execute("PRAGMA user_version").fetchone()[0]
+    for u in tg.api("getUpdates", offset=offset + 1, timeout=wait):
+        try:
+            if "callback_query" in u:
+                on_callback(c, u["callback_query"])
+            elif "message" in u:
+                on_message(c, u["message"])
+        except sqlite3.OperationalError:
+            raise  # база занята прогоном: это обновление заберём ещё раз
+        except Exception as ex:
+            # Одно непонятное обновление не должно останавливать остальные
+            print("update error:", type(ex).__name__, ex, flush=True)
+        c.execute(f"PRAGMA user_version={int(u['update_id'])}")
+        c.commit()
+
+
+def remind(c):
+    """Напоминание о взятом лиде, этап которого давно не менялся. По каждому этапу — одно."""
+    rows = c.execute(
+        "SELECT rowid, * FROM posts WHERE feedback='take' AND (stage IS NULL OR stage IN ('wrote', 'replied'))"
+        " AND reminded_at IS NULL AND stage_at < ?", (db.ago(hours=REMIND_AFTER_HOURS),)).fetchall()
+    for r in rows:
+        card = json.loads(r["card"] or "{}")
+        tg.send(f"⏰ Лид в работе, этап «{tg.STAGES.get(r['stage'], 'без этапа')}» не менялся больше"
+                f" {REMIND_AFTER_HOURS} ч.\n<b>{tg.esc(card.get('niche'))}</b> — {tg.esc(card.get('need'))}\n"
+                f"<a href=\"{tg.esc(r['order_url'] or r['url'])}\">Открыть</a>",
+                reply_markup=tg.row_keyboard(r),
+                **({"reply_parameters": {"message_id": int(r["tg_msg_id"]), "allow_sending_without_reply": True}}
+                   if r["tg_msg_id"] else {}))
+        c.execute("UPDATE posts SET reminded_at=? WHERE rowid=?", (db.now(), r["rowid"]))
+        c.commit()
+
+
+def check(c):
+    """Раз в CHECK_EVERY секунд, днём по Москве: напоминания и проверка, что прогоны идут."""
+    global _checked
+    hour = datetime.now(tg.MSK).hour
+    if time.time() - _checked < CHECK_EVERY or not RUN_HOURS[0] <= hour <= RUN_HOURS[-1]:
+        return
+    _checked = time.time()
+    remind(c)
+    last = c.execute("SELECT MAX(started_at) FROM runs").fetchone()[0]
+    if last and hour >= RUN_HOURS[0] + 3 and last < db.ago(hours=5):
+        tg.alert(c, "norun", "Прогонов не было больше 5 часов. Проверьте на сервере: "
+                             "systemctl list-timers leadbot.timer")
+
+
+def setup(c):
+    """Меню команд и кнопки под полем ввода. Клавиатуру рассылаем один раз на версию, а не при каждом перезапуске."""
+    tg.api("setMyCommands", commands=[{"command": k, "description": v} for k, v in tg.COMMANDS.items()])
+    if db.get_meta(c, "menu") != MENU_VERSION:
+        tg.send("Бот обновлён: команды теперь на кнопках внизу.", reply_markup=tg.menu_keyboard())
+        db.set_meta(c, "menu", MENU_VERSION)
+
+
+if __name__ == "__main__":
+    c = db.connect()
+    ready = False
+    while True:
+        try:
+            if not ready:
+                setup(c)
+                ready = True
+            poll(c)
+            check(c)
+        except Exception as ex:
+            # Обрыв сети или занятая база — ждём и продолжаем
+            print("feedback error:", type(ex).__name__, ex, flush=True)
+            time.sleep(5)

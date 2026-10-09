@@ -1,0 +1,22 @@
+# Публичные каналы (t.me/s/, без аккаунта). Отобраны по критериям: от 500 подписчиков, пост не старше 14 дней.
+# Полная база и исключённые: chats.md
+# Биржи заказов и тендеры
+jobs_start
+freelancetaverna
+FreelanceBay
+digitaltender
+workayte
+freelance_zakazy
+workk_on
+FreeVacanciesIT
+# Вакансии операторов и администраторов: кто нанимает — тому можно предложить голосового агента
+ccnadomu
+perezvonyu
+# Бизнес и ниши
+biznessbut
+tutnetwork
+# Эксперты и мероприятия, низкая отдача: можно отключить после первого прогона
+event_mssk
+belochkinanastassia
+ArinaAlexx
+grebenukm

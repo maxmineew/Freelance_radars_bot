@@ -1,0 +1,15 @@
+[Unit]
+Description=LeadBot: instant answers to card buttons
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=leadbot
+WorkingDirectory=/opt/leadbot
+Environment=PYTHONIOENCODING=utf-8
+ExecStart=/opt/leadbot/venv/bin/python -u -m leadbot.feedback
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
