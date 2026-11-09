@@ -139,19 +139,23 @@ def main():
                 db.set_meta(c, "radar:heartbeat", db.now())
                 db.set_meta(c, "radar:state", "bothost")
                 next_heartbeat = now + HEARTBEAT_SECONDS
-            # 3. Обработчик очереди: маленькая партия, как у радара
+            # 3. Обработчик очереди: маленькая партия, как у радара. Слот полного
+            #    прогона важнее: пока он открыт, работника не поднимаем, иначе он
+            #    займёт блокировку и прогон стартует впустую («Прогон уже идёт»)
+            hour = datetime.now(MSK).hour
+            full_pending = hour in RUN_HOURS and hour != full_hour
             if worker is not None and worker.poll() is not None:
                 if worker.returncode:
                     print(f"Цикл: обработчик завершился с кодом {worker.returncode}", flush=True)
                 worker = None
-            if (full is None and worker is None and now >= next_worker
+            if (full is None and worker is None and now >= next_worker and not full_pending
                     and not db.active_run(c) and not db.manual_run_requested(c) and has_work(c)):
                 worker = spawn(["--radar-worker"])
                 next_worker = now + RADAR_WORKER_SECONDS
             # 4. Полный прогон по расписанию: поиск сообществ отключён, но большая
-            #    партия оценки, восстановление очереди и сводка метрик — как по таймеру
-            hour = datetime.now(MSK).hour
-            if full is None and hour in RUN_HOURS and hour != full_hour and now >= next_full_retry:
+            #    партия оценки, восстановление очереди и сводка метрик — как по таймеру.
+            #    Ждём, пока работчик завершится и освободит блокировку прогонов
+            if full_pending and full is None and worker is None and now >= next_full_retry:
                 if db.active_run(c) or db.manual_run_requested(c):
                     next_full_retry = now + FULL_RUN_RETRY_SECONDS
                 else:
