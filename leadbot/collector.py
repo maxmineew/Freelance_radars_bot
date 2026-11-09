@@ -1,10 +1,11 @@
 """Сбор постов из публичных каналов через t.me/s/<channel> (без аккаунта, только чтение)."""
 import time
+import re
 from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timedelta, timezone
 import httpx
 from bs4 import BeautifulSoup
-from .config import SOURCES_FILE, PAGES_PER_CHANNEL, MAX_AGE_DAYS, KEYWORDS
+from .config import muted, SOURCES_FILE, DISCOVERED_SOURCES_FILE, PAGES_PER_CHANNEL, MAX_CARD_AGE_HOURS, KEYWORDS
 from . import db
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; lead-research/0.1)"}
@@ -12,10 +13,16 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; lead-research/0.1)"}
 
 def load_sources():
     out = []
-    for line in SOURCES_FILE.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            out.append(line.lstrip("@"))
+    off = muted()
+    for path in (SOURCES_FILE, DISCOVERED_SOURCES_FILE):
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                name = line.lstrip("@").lower()
+                if name not in out and name not in off:
+                    out.append(name)
     return out
 
 
@@ -24,6 +31,7 @@ EXCHANGES = {
     "kwork.ru": "Kwork", "fl.ru": "FL.ru", "freelance.ru": "Freelance.ru",
     "freelance.habr.com": "Хабр Фриланс", "youdo.com": "YouDo", "workzilla.com": "Workzilla",
     "weblancer.net": "Weblancer", "pchel.net": "Пчёл.нет", "profi.ru": "Профи.ру",
+    "uslugi.yandex.ru": "Яндекс Услуги",
 }
 _SKIP_PATHS = ("new_project", "/register", "/signup", "/login")
 
@@ -62,18 +70,21 @@ def parse_page(html):
 
 def prefilter(text):
     low = f" {text.lower()} "
-    return len(text) > 40 and any(k in low for k in KEYWORDS)
+    relevant = any(k in low for k in KEYWORDS)
+    explicit = re.search(r"ищу|ищем|нужен|нужна|нужны|требуется|посоветуйте|порекомендуйте", low)
+    return relevant and (len(text) > 40 or (len(text.strip()) >= 12 and explicit is not None))
 
 
 failed = []  # каналы, страница которых в этом прогоне не открылась
 
 
-def collect(c):
-    limit = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
+def collect(c, sources=None):
+    """sources — только эти каналы (прогон по одному источнику); по умолчанию все."""
+    limit = datetime.now(timezone.utc) - timedelta(hours=MAX_CARD_AGE_HOURS)
     new = []
     failed.clear()
     with httpx.Client(headers=HEADERS, timeout=20, follow_redirects=True) as http:
-        for ch in load_sources():
+        for ch in (load_sources() if sources is None else sources):
             before = None
             for _ in range(PAGES_PER_CHANNEL):
                 url = f"https://t.me/s/{ch}" + (f"?before={before}" if before else "")
@@ -99,6 +110,7 @@ def collect(c):
                          db.text_hash(p["text"]), db.sketch(p["text"])),
                     )
                     if cur.rowcount and status == "new":
+                        db.enqueue(c, p)
                         new.append(p)
                 before = min(p["msg_id"] for p in posts)
                 c.commit()  # до паузы: иначе база занята весь сбор и слушатель кнопок не может записать отметку

@@ -7,12 +7,13 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from . import db, reports, telegram_out as tg
+from . import db, reports, targets, telegram_out as tg
 from .config import ROOT, OWNER_CHAT_ID, REMIND_AFTER_HOURS, RUN_HOURS, MAX_CARD_AGE_HOURS
 
-MENU_VERSION = "2"   # поменяйте при изменении кнопок меню: слушатель разошлёт новую клавиатуру
+MENU_VERSION = "3"   # поменяйте при изменении кнопок меню: слушатель разошлёт новую клавиатуру
 CHECK_EVERY = 600    # как часто проверять напоминания, секунд
 RESEND_LIMIT = 10    # сколько карточек присылать повторно за одно нажатие
+PICK_PAGE = 10       # источников на одной странице выбора
 _run = None          # прогон, запущенный кнопкой
 _checked = 0
 
@@ -33,6 +34,25 @@ def on_callback(c, cb):
     if OWNER_CHAT_ID not in (str(cb["from"]["id"]), str(chat_id)):
         return answer("Кнопки доступны только владельцу бота")
     action, _, key = (cb.get("data") or "").partition("|")
+    if action == "pick":  # листание списка источников
+        page = int(key) if key.isdigit() else 0
+        if chat_id:
+            text, markup = picker(c, page)
+            tg.try_api("editMessageText", chat_id=chat_id, message_id=msg["message_id"], text=text,
+                       parse_mode="HTML", reply_markup=markup)
+        return answer("")
+    if action == "src":  # выбран источник: запускаем прогон только по нему
+        target = targets.find(c, key)
+        if not target:
+            set_keyboard({"inline_keyboard": []})
+            return answer("Источник не найден: список изменился, нажмите кнопку ещё раз")
+        kind, src, label = target
+        if chat_id:
+            tg.try_api("editMessageText", chat_id=chat_id, message_id=msg["message_id"], parse_mode="HTML",
+                       text=f"🎯 Прогон по источнику: {targets.KINDS[kind]} {tg.esc(label)}")
+        answer("Запускаю")
+        tg.send(start_run(c, (kind, src)), reply_markup=tg.menu_keyboard())
+        return
     ch, _, mid = key.rpartition("|")
     row = None
     if mid.isdigit() and action in {**tg.BUTTONS, **tg.REASONS, **tg.STAGES}:
@@ -61,12 +81,52 @@ def on_callback(c, cb):
     set_keyboard(tg.card_keyboard(key, feedback, reason, stage))
 
 
-def start_run(c):
+def start_run(c, target=None):
+    """target=(kind, source) — прогон только по одному источнику."""
     global _run
-    if db.active_run(c) or (_run and _run.poll() is None):
-        return "Прогон уже идёт. Итог пришлю, когда закончится."
-    _run = subprocess.Popen([sys.executable, "-u", str(ROOT / "run.py"), "--notify"], cwd=ROOT)
+    if _run and _run.poll() is None:
+        return "Прогон по кнопке уже идёт. Итог пришлю, когда закончится, потом можно запустить следующий."
+    busy = db.active_run(c)
+    args = [sys.executable, "-u", str(ROOT / "run.py"), "--notify"]
+    if target:
+        args += ["--source", f"{target[0]}:{target[1]}"]
+    # run.py --notify сам дождётся окончания чужого прогона и обязательно пришлёт итог
+    _run = subprocess.Popen(args, cwd=ROOT)
+    if busy:
+        return ("Сейчас идёт другой прогон (радар или по расписанию). "
+                "Ваш начнётся сразу после него, итог пришлю.")
+    if target:
+        return "Прогон по источнику запущен. Обычно это меньше минуты, итог пришлю."
     return "Прогон запущен. Обычно он занимает несколько минут, итог пришлю."
+
+
+def picker(c, page=0):
+    """Список каналов и чатов кнопками, по PICK_PAGE на странице."""
+    items = targets.all_targets(c)
+    if not items:
+        return "Источников нет: добавьте каналы в sources.txt или чаты в chats.txt.", None
+    pages = (len(items) + PICK_PAGE - 1) // PICK_PAGE
+    page = min(max(page, 0), pages - 1)
+    rows = [[{"text": f"{targets.KINDS[kind]} {label}"[:60], "callback_data": f"src|{targets.key(kind, src)}"}]
+            for kind, src, label in items[page * PICK_PAGE:(page + 1) * PICK_PAGE]]
+    nav = []
+    if page > 0:
+        nav.append({"text": "◀️ Назад", "callback_data": f"pick|{page - 1}"})
+    if page < pages - 1:
+        nav.append({"text": "Дальше ▶️", "callback_data": f"pick|{page + 1}"})
+    if nav:
+        rows.append(nav)
+    text = ("<b>Прогон по источнику</b>\nВыберите канал или чат — проверю только его."
+            f"\n💬 чат · 📢 канал · страница {page + 1} из {pages}")
+    return text, {"inline_keyboard": rows}
+
+
+def pick(c):
+    text, markup = picker(c)
+    if markup:
+        tg.send(text, reply_markup=markup)
+        return None
+    return text
 
 
 def resend(c):
@@ -92,11 +152,12 @@ def on_message(c, m):
     if str(m["chat"]["id"]) != OWNER_CHAT_ID:
         return
     text = (m.get("text") or "").strip()
-    cmd = tg.MENU.get(text) or (text.split()[0].split("@")[0][1:].lower() if text.startswith("/") else "")
+    cmd = tg.MENU.get(text) or tg.LEGACY_MENU.get(text) or (text.split()[0].split("@")[0][1:].lower() if text.startswith("/") else "")
     handlers = {"stats": reports.stats, "sources": reports.sources, "leads": reports.leads,
-                "status": reports.status, "run": start_run, "cards": resend}
+                "status": reports.status, "run": start_run, "cards": resend, "pick": pick}
     reply = handlers[cmd](c) if cmd in handlers else reports.HELP
-    tg.send(reply, reply_markup=tg.menu_keyboard())
+    if reply:  # выбор источника уже отправил своё сообщение с кнопками
+        tg.send(reply, reply_markup=tg.menu_keyboard())
 
 
 def poll(c, wait=50):

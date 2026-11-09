@@ -1,0 +1,10 @@
+.git
+.env
+*.db
+*.db-*
+*.session*
+*.lock
+run.log
+__pycache__/
+backup-*/
+data/

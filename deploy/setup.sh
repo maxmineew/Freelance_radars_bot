@@ -18,11 +18,15 @@ chown -R leadbot:leadbot "$APP"
 chmod 600 .env
 [ -f watcher.session ] && chmod 600 watcher.session
 
-cp deploy/leadbot.service deploy/leadbot.timer deploy/leadbot-feedback.service /etc/systemd/system/
+cp deploy/leadbot.service deploy/leadbot.timer deploy/leadbot-feedback.service deploy/leadbot-retry.service deploy/leadbot-retry.timer /etc/systemd/system/
+cp deploy/leadbot-radar.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now leadbot.timer
+systemctl enable --now leadbot-retry.timer
 systemctl enable leadbot-feedback.service
 systemctl restart leadbot-feedback.service
+systemctl enable leadbot-radar.service
+systemctl restart leadbot-radar.service
 
 echo "--- Проверка доступа к Telegram с сервера"
 curl -s -o /dev/null -m 15 -w "t.me: %{http_code}\n" https://t.me/s/jobs_start || echo "t.me: недоступен"

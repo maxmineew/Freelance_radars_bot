@@ -1,0 +1,12 @@
+[Unit]
+Description=LeadBot: recover and evaluate pending messages
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=leadbot
+WorkingDirectory=/opt/leadbot
+Environment=PYTHONIOENCODING=utf-8
+ExecStart=/opt/leadbot/venv/bin/python -u run.py --retry-only
+TimeoutStartSec=1800

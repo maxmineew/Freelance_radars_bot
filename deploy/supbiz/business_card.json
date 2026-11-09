@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "target": "@supbiz",
+  "first_date": "2026-10-21",
+  "interval_days": 2,
+  "time": "11:00",
+  "text_file": "business_card.txt"
+}

@@ -18,8 +18,9 @@ HELP = (
     "📡 Источники — какие каналы дают лиды, а какие нет\n"
     "✅ Мои лиды — взятые лиды и их этапы\n"
     "📬 Пришли карточки — ещё раз прислать свежие карточки без отметки\n"
-    "ℹ️ Статус — последний и следующий прогон\n"
-    "▶️ Прогон — запустить вне расписания"
+    "🎯 Прогон по источнику — выбрать канал или чат и проверить только его\n"
+    "▶️ Прогон — запустить вне расписания\n\n"
+    "/status — последний и следующий прогон, состояние радара"
 )
 
 
@@ -127,5 +128,18 @@ def status(c):
     lines.append(f"\nСледующий по расписанию: {next_run():%d.%m %H:%M} МСК")
     n = c.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
     lines.append(f"Источники: каналов {len(load_sources())}, чатов {len(load_chats())}")
+    heartbeat = db.get_meta(c, "radar:heartbeat")
+    if heartbeat:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(heartbeat)).total_seconds()
+        state = db.get_meta(c, "radar:state")
+        label = {"connected": "наблюдает", "paused": "уступил сессию прогону",
+                 "waiting": "ждёт окончания паузы Telegram",
+                 "reconnecting": "переподключается", "stopped": "остановлен"}.get(state, "неизвестен")
+        lines.append(f"Радар: {label if age < 180 else 'нет свежего сигнала'} · {_msk(heartbeat)} МСК")
     lines.append(f"Записей в базе: {n} · модель: {esc(MODEL)}")
+    queued = c.execute("SELECT COUNT(*) FROM llm_queue").fetchone()[0]
+    lines.append(f"Ожидают оценки LLM: {queued}; радар обрабатывает очередь круглосуточно, резервный повтор — по таймеру")
+    last_model = db.get_meta(c, "llm:last_model")
+    if last_model:
+        lines.append(f"Последняя успешная оценка: {esc(last_model)}")
     return "\n".join(lines)

@@ -1,0 +1,9 @@
+[Unit]
+Description=LeadBot: retry queue every 15 minutes during Moscow daytime
+
+[Timer]
+OnCalendar=*-*-* 09..21:15,30,45:00 Europe/Moscow
+Persistent=true
+
+[Install]
+WantedBy=timers.target

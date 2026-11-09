@@ -8,8 +8,8 @@ import time
 from telethon import events
 from telethon.errors import FloodWaitError
 
-from . import collector, db, watcher, telegram_out, classifier, kwork, flru
-from .config import FLRU_ENABLED, FLRU_POLL_SECONDS, KWORK_ENABLED, KWORK_POLL_SECONDS, ROOT, SESSION, TG_API_ID, TG_API_HASH, RADAR_POLL_SECONDS, RADAR_WORKER_SECONDS, MAX_CARD_AGE_HOURS, MIN_SCORE
+from . import collector, db, watcher, telegram_out, classifier, kwork, flru, pchel, monitor
+from .config import PCHEL_ENABLED, PCHEL_POLL_SECONDS, MONITOR_SECONDS, FLRU_ENABLED, FLRU_POLL_SECONDS, KWORK_ENABLED, KWORK_POLL_SECONDS, ROOT, SESSION, TG_API_ID, TG_API_HASH, RADAR_POLL_SECONDS, RADAR_WORKER_SECONDS, MAX_CARD_AGE_HOURS, MIN_SCORE
 from .session_lock import SessionLock
 from . import business_card
 
@@ -59,7 +59,7 @@ def main():
     peers = set()
     poll_sources = []
     poll_index = 0
-    next_poll = next_worker = next_heartbeat = retry_connect = next_kwork = next_flru = 0
+    next_poll = next_worker = next_heartbeat = retry_connect = next_kwork = next_flru = next_pchel = next_monitor = 0
 
     def stop(*_):
         nonlocal stopped
@@ -168,6 +168,22 @@ def main():
                 except Exception as exc:
                     next_flru = time.monotonic() + FLRU_POLL_SECONDS * 3
                     print(f"Радар: FL.ru не ответил ({type(exc).__name__})", flush=True)
+            if PCHEL_ENABLED and now >= next_pchel:
+                try:
+                    found = pchel.collect(c)
+                    if found:
+                        print(f"Радар: новых проектов Pchel.net {len(found)}", flush=True)
+                        next_worker = 0
+                    next_pchel = time.monotonic() + PCHEL_POLL_SECONDS
+                except Exception as exc:
+                    next_pchel = time.monotonic() + PCHEL_POLL_SECONDS * 3
+                    print(f"Радар: Pchel.net не ответил ({type(exc).__name__})", flush=True)
+            if now >= next_monitor:
+                try:
+                    monitor.check(c)
+                except Exception as exc:
+                    print(f"Радар: мониторинг не выполнен ({type(exc).__name__})", flush=True)
+                next_monitor = time.monotonic() + MONITOR_SECONDS
             if now >= next_heartbeat:
                 db.set_meta(c, "radar:heartbeat", db.now())
                 db.set_meta(c, "radar:state", "paused" if busy else "waiting" if telegram_wait else "connected" if client is not None else "reconnecting")

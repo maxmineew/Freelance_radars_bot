@@ -220,6 +220,8 @@ class CliUnavailable(RuntimeError):
 
 
 def provider_list():
+    if LLM_BACKEND == "codex_cli":
+        return [("codex_cli", os.getenv("CODEX_MODEL") or "default")]
     if LLM_BACKEND == "claude_cli":
         return [("claude_cli", CLAUDE_MODEL)]
     providers = []
@@ -232,12 +234,13 @@ def provider_list():
     return providers
 
 
-def run_claude_cli(system, content, model):
-    """Оценка через `claude -p` под логином подписки. API-ключ из окружения убираем,
-    иначе CLI пошёл бы по API-оплате, а не по подписке."""
+def _cli_call(system, prompt, model):
+    """Один вызов `claude -p` под логином подписки; возвращает текст ответа.
+    API-ключ из окружения убираем, иначе CLI пошёл бы по API-оплате, а не по подписке."""
+    if LLM_BACKEND == "codex_cli":
+        from .codex_backend import call
+        return call(system, prompt, model)
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
-    prompt = ("Ответь ТОЛЬКО одним JSON-объектом без пояснений и без markdown, строго по схеме:" + chr(10)
-              + json.dumps(CARD_SCHEMA, ensure_ascii=False) + chr(10) * 2 + "Сообщение для оценки:" + chr(10) + content)
     cmd = [shutil.which(CLAUDE_CLI) or CLAUDE_CLI, "-p", "--model", model, "--output-format", "json", "--tools", "",
            "--system-prompt", system, "--no-session-persistence", "--disable-slash-commands"]
     try:
@@ -260,10 +263,73 @@ def run_claude_cli(system, content, model):
         if "limit" in low or "429" in low or "overloaded" in low:
             raise CliUnavailable("claude CLI usage limit", 900)
         raise CliUnavailable("claude CLI exit %s" % proc.returncode, 300)
+    return text
+
+
+def run_claude_cli(system, content, model):
+    prompt = ("Ответь ТОЛЬКО одним JSON-объектом без пояснений и без markdown, строго по схеме:" + chr(10)
+              + json.dumps(CARD_SCHEMA, ensure_ascii=False) + chr(10) * 2 + "Сообщение для оценки:" + chr(10) + content)
+    text = _cli_call(system, prompt, model)
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end < start:
         raise ValueError("No JSON object")
     return validate_card(json.loads(text[start:end + 1]), require_qualification=True)
+
+
+def run_claude_cli_batch(system, contents, model):
+    """Несколько сообщений за один вызов. Возвращает список той же длины: карточка или None, если ответ по ней негоден."""
+    nl = chr(10)
+    parts = [f"=== Сообщение {i} ==={nl}{content}" for i, content in enumerate(contents, 1)]
+    prompt = (f"Оцени каждое из {len(contents)} сообщений независимо друг от друга. Ответь ТОЛЬКО JSON-массивом "
+              f"из {len(contents)} объектов в том же порядке, без пояснений и без markdown. "
+              f"Каждый объект строго по схеме:{nl}" + json.dumps(CARD_SCHEMA, ensure_ascii=False) + nl * 2 + (nl * 2).join(parts))
+    text = _cli_call(system, prompt, model)
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end < start:
+        raise ValueError("No JSON array")
+    raw = json.loads(text[start:end + 1])
+    if not isinstance(raw, list) or len(raw) != len(contents):
+        raise ValueError("Batch size mismatch")
+    out = []
+    for item in raw:
+        try:
+            out.append(validate_card(item, require_qualification=True))
+        except (ValueError, KeyError, TypeError):
+            out.append(None)
+    return out
+
+
+def build_content(text, exchange=None, chat=None, copies=0, posted_at=None):
+    content = anonymize(text)[:3000]
+    if posted_at:
+        posted = datetime.fromisoformat(posted_at).astimezone(MSK)
+        today = datetime.now(MSK)
+        content = (f"[Опубликовано: {_day(posted)}. Сегодня: {_day(today)}, прошло дней: {(today - posted).days}. "
+                   f"Сначала проверь срок из текста: если он уже прошёл, это не лид.]{chr(10)}{content}")
+    if copies > 0 and not exchange:
+        content = (f"[Этот же текст опубликован ещё в {copies} источниках: скорее всего рассылка или реклама, "
+                   f"лидом считай только если это явный заказ.]{chr(10)}{content}")
+    if chat:
+        content = f"[Сообщение участника чата «{chat}».]{chr(10)}{content}"
+    if exchange:
+        content = (f"[Заказ размещён на бирже {exchange}. Это всё равно лид, оценивай по сути задачи; "
+                   f"hook пиши как текст отклика на бирже.]{chr(10)}{content}")
+    return content
+
+
+def batch_model():
+    return next((m for p, m in provider_list() if p in {"claude_cli", "codex_cli"}), None)
+
+
+def classify_batch(items, examples=""):
+    """items: словари text/exchange/chat/copies/posted_at. Потокобезопасно: базу не трогает.
+    Ошибки CLI (CliUnavailable) пробрасываются — паузу выставляет вызывающий."""
+    model = batch_model()
+    if model is None:
+        raise ClassificationError("LLM: claude_cli is not configured", retry_after=3600, blocked=True)
+    contents = [build_content(i["text"], i.get("exchange"), i.get("chat"), i.get("copies", 0), i.get("posted_at"))
+                for i in items]
+    return run_claude_cli_batch(SYSTEM + examples[:1200], contents, model)
 
 
 def classify(text: str, exchange: str | None = None, chat: str | None = None, copies: int = 0,
@@ -271,20 +337,7 @@ def classify(text: str, exchange: str | None = None, chat: str | None = None, co
     global _client
     system = SYSTEM + examples[:1200]
     _client = _client or httpx.Client(timeout=60)
-    content = anonymize(text)[:3000]
-    if posted_at:
-        posted = datetime.fromisoformat(posted_at).astimezone(MSK)
-        today = datetime.now(MSK)
-        content = (f"[Опубликовано: {_day(posted)}. Сегодня: {_day(today)}, прошло дней: {(today - posted).days}. "
-                   f"Сначала проверь срок из текста: если он уже прошёл, это не лид.]\n{content}")
-    if copies > 0 and not exchange:
-        content = (f"[Этот же текст опубликован ещё в {copies} источниках: скорее всего рассылка или реклама, "
-                   f"лидом считай только если это явный заказ.]\n{content}")
-    if chat:
-        content = f"[Сообщение участника чата «{chat}».]\n{content}"
-    if exchange:
-        content = (f"[Заказ размещён на бирже {exchange}. Это всё равно лид, оценивай по сути задачи; "
-                   f"hook пиши как текст отклика на бирже.]\n{content}")
+    content = build_content(text, exchange, chat, copies, posted_at)
     providers = provider_list()
     if not providers:
         raise ClassificationError("LLM: API key is not configured", retry_after=3600, blocked=True)
@@ -295,13 +348,17 @@ def classify(text: str, exchange: str | None = None, chat: str | None = None, co
         if delay:
             delays.append(delay)
             continue
-        if provider == "claude_cli":
+        if provider in {"claude_cli", "codex_cli"}:
             pause = LLM_MIN_INTERVAL_SECONDS - (time.monotonic() - _last_request.get(key, 0))
             if pause > 0:
                 time.sleep(pause)
             _last_request[key] = time.monotonic()
             try:
-                card = run_claude_cli(system, content, model)
+                if provider == "codex_cli":
+                    from .codex_backend import classify as run_codex
+                    card = run_codex(system, content, model)
+                else:
+                    card = run_claude_cli(system, content, model)
             except CliUnavailable as exc:
                 cooldown(key, exc.delay, state)
                 delays.append(exc.delay)

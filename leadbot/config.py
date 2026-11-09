@@ -5,7 +5,11 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-DB_PATH = ROOT / "leads.db"
+# Контейнер (Bothost): пересборка сохраняет только токен, env, домен и папку data/,
+# поэтому всё изменяемое состояние (база, найденные источники, отключённые источники,
+# сессия наблюдателя) живёт в DATA_DIR. Локально env не задан — всё лежит в корне.
+DATA_DIR = Path(os.getenv("DATA_DIR")) if os.getenv("DATA_DIR") else ROOT
+DB_PATH = DATA_DIR / "leads.db"
 SOURCES_FILE = ROOT / "sources.txt"
 # Оценку делает Groq, если в .env есть GROQ_API_KEY, иначе Gemini
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -17,11 +21,23 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL") or "claude-haiku-5-5"
 # Бэкенд оценки: "claude_cli" — только Anthropic через `claude -p` с логином подписки (без API-ключей),
+# "codex_cli" — OpenAI через Codex CLI с входом ChatGPT; CODEX_MODEL задаёт модель (иначе выбор CLI).
 # "api" — прежняя цепочка Groq/Anthropic API/Gemini
 LLM_BACKEND = os.getenv("LLM_BACKEND", "claude_cli")
 CLAUDE_CLI = os.getenv("CLAUDE_CLI", "claude")
 CLAUDE_CLI_TIMEOUT = int(os.getenv("CLAUDE_CLI_TIMEOUT", "120"))
 MAX_CLASSIFICATIONS_PER_RUN = 30
+# Пакетная оценка через Claude CLI: несколько сообщений за один вызов и несколько вызовов параллельно
+CLAUDE_BATCH_SIZE = int(os.getenv("CLAUDE_BATCH_SIZE", "5"))
+CLAUDE_WORKERS = int(os.getenv("CLAUDE_WORKERS", "3"))
+REPLIES_COOL = 3            # столько ответов в чате — лид остыл, карточку не шлём
+SOURCE_MUTE_MIN_MARKS = 15  # отметок по источнику, после которых считаем точность
+SOURCE_MUTE_PRECISION = 0.15  # ниже этой доли «Беру» источник отключаем
+DISK_ALERT_PERCENT = 90
+QUEUE_ALERT_SIZE = 1500
+MONITOR_SECONDS = 600
+DISCOVERY_SAMPLE = 100      # сообщений чата, по которым оцениваем долю заявок
+DISCOVERY_MIN_DEMAND = 2    # минимум явных заявок в выборке
 LLM_MIN_INTERVAL_SECONDS = 5
 QUEUE_RECOVERY_LIMIT = 200
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -42,7 +58,11 @@ FLRU_ENABLED = os.getenv("FLRU_ENABLED", "1") != "0"
 FLRU_CHANNEL = "fl.ru"         # «канал» для заказов FL.ru в таблице posts
 FLRU_POLL_SECONDS = int(os.getenv("FLRU_POLL_SECONDS", "60"))
 # Биржи, которые читаем напрямую: у их записей нет поста в Telegram
-EXCHANGE_CHANNELS = {KWORK_CHANNEL, FLRU_CHANNEL}
+# Pchel.net: открытая RSS-лента проектов (Хабр Фриланс закрылся, Weblancer/YouDo закрыты защитой от ботов)
+PCHEL_ENABLED = os.getenv("PCHEL_ENABLED", "1") != "0"
+PCHEL_CHANNEL = "pchel.net"
+PCHEL_POLL_SECONDS = int(os.getenv("PCHEL_POLL_SECONDS", "300"))
+EXCHANGE_CHANNELS = {KWORK_CHANNEL, FLRU_CHANNEL, PCHEL_CHANNEL}
 MAX_AGE_DAYS = 14       # старые посты не берём
 MAX_CARD_AGE_HOURS = 3  # максимальный возраст заявки при сборе, оценке и отправке
 PAGES_PER_CHANNEL = 3    # глубина пагинации t.me/s (~20 постов на страницу)
@@ -52,10 +72,18 @@ RUN_HOURS = [9, 11, 13, 15, 17, 19, 21]  # расписание прогонов
 
 # Этап 2: наблюдатель за чатами (отдельный аккаунт, только чтение)
 CHATS_FILE = ROOT / "chats.txt"
-DISCOVERED_CHATS_FILE = ROOT / "chats_discovered.txt"
-DISCOVERED_SOURCES_FILE = ROOT / "sources_discovered.txt"
+DISCOVERED_CHATS_FILE = DATA_DIR / "chats_discovered.txt"
+DISCOVERED_SOURCES_FILE = DATA_DIR / "sources_discovered.txt"
 DISCOVERY_MAX_ADDITIONS = 3
-SESSION = ROOT / "watcher"           # файл сессии watcher.session
+MUTED_FILE = DATA_DIR / "muted_sources.txt"  # источники, отключённые из-за низкой точности; удалите строку, чтобы вернуть
+
+
+def muted():
+    if not MUTED_FILE.exists():
+        return set()
+    return {l.strip().lstrip("@").lower() for l in MUTED_FILE.read_text(encoding="utf-8").splitlines()
+            if l.strip() and not l.startswith("#")}
+SESSION = DATA_DIR / "watcher"       # файл сессии watcher.session
 TG_API_ID = os.getenv("TG_API_ID", "")
 TG_API_HASH = os.getenv("TG_API_HASH", "")
 CHAT_MSG_LIMIT = 100     # размер страницы; непрочитанное догоняем следующими страницами

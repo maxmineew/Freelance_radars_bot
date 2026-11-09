@@ -1,10 +1,19 @@
 .env
 *.db
+*.db-*
 *.session*
+*.lock
+deploy/.testdeps/
 run.log
 __pycache__/
+data/
+backup-*/
+business_card.session*
 
 # Приватные ссылки-приглашения в чаты: в публичный репозиторий не кладём
 chats.txt
 chats.md
 .claude/
+chats_discovered.txt
+sources_discovered.txt
+deploy/*-update.tar.gz

@@ -21,4 +21,4 @@ if [ -f watcher.session ] && ! ssh "$HOST" 'test -f /opt/leadbot/watcher.session
 fi
 
 tar czf - --exclude=__pycache__ $FILES -C "$TMP" .env | ssh "$HOST" \
-    "mkdir -p /opt/leadbot && tar xzf - -C /opt/leadbot && sed -i 's/\r\$//' /opt/leadbot/deploy/* && bash /opt/leadbot/deploy/setup.sh"
+    "mkdir -p /opt/leadbot && tar xzf - -C /opt/leadbot && find /opt/leadbot/deploy -maxdepth 1 -type f -exec sed -i 's/\r\$//' {} + && bash /opt/leadbot/deploy/setup.sh"

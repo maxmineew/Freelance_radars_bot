@@ -3,3 +3,4 @@ beautifulsoup4
 lxml
 python-dotenv
 telethon
+ddgs==9.16.0
