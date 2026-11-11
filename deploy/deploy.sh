@@ -9,6 +9,9 @@ cd "$(dirname "$0")/.."
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 grep -v '^my_aeza_net' .env > "$TMP/.env"
+# На сервере нет входа в Claude CLI по подписке — оценка через API-цепочку (Groq/Anthropic/Gemini)
+sed -i 's/^LLM_BACKEND=.*/LLM_BACKEND=api/' "$TMP/.env"
+grep -q '^LLM_BACKEND=' "$TMP/.env" || echo "LLM_BACKEND=api" >> "$TMP/.env"
 for v in TG_API_ID TG_API_HASH; do
     grep -q "^$v=" "$TMP/.env" || echo "$v=${!v:?$v не найден ни в .env, ни в переменных среды}" >> "$TMP/.env"
 done
