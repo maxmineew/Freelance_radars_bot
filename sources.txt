@@ -23,7 +23,7 @@ grebenukm
  # Заказы и тендеры на услуги контакт-центров (проверено 2026-10-14)
 callbase_ru
 
-# ????????? ?? ??????? 2026-10-19
+# Добавление от 2026-10-19
 mari_vakansii
 mari_vakansiii
 Koteyka_Freelancer
@@ -34,3 +34,11 @@ vacantcist
 naudalenkebro
 vakansii_chatgpt
 businessclass_rbc
+
+# Аудитория курса «Английский для предпринимателей» — добавлено 2026-11-11
+business_english_pro
+mama_predprinimatel_official
+tele_360chat
+poisk_uchenikov
+# tradewithoutborders  # ВЭД/экспорт; лента живая, но свежесть ≤14 дней не подтверждена
+# logistved            # ВЭД/логистика; свежесть постов не подтверждена
