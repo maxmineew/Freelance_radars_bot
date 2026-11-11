@@ -9,7 +9,8 @@ from .config import BOT_TOKEN, OWNER_CHAT_ID, EXCHANGE_CHANNELS
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 MSK = timezone(timedelta(hours=3))
 SERVICES = {"voice_agent": "🎙 Голосовой агент", "chatbot": "💬 Чат-бот", "ai_assistant": "🤖 AI-ассистент",
-            "automation": "⚙️ Автоматизация", "other": "❔ Другое"}
+            "automation": "⚙️ Автоматизация", "english_course": "🇬🇧 Английский для предпринимателей",
+            "other": "❔ Другое"}
 BUTTONS = {"take": "✅ Беру", "skip": "⏭ Мимо", "wrong": "🎯 Неточно"}
 # Второй ряд кнопок: причина после «Неточно», этап работы после «Беру»
 REASONS = {"ad": "📢 Реклама", "stale": "⌛ Устарел", "service": "🧩 Не моя услуга", "notclient": "🙅 Не клиент"}
